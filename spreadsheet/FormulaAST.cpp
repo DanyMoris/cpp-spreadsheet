@@ -5,12 +5,14 @@
 #include "FormulaParser.h"
 
 #include <cassert>
+#include <climits>
 #include <cmath>
 #include <memory>
-#include <optional>
 #include <sstream>
 
 namespace ASTImpl {
+
+using CellLookup = FormulaAST::CellLookup;
 
 enum ExprPrecedence {
     EP_ADD,
@@ -72,7 +74,7 @@ public:
     virtual ~Expr() = default;
     virtual void Print(std::ostream& out) const = 0;
     virtual void DoPrintFormula(std::ostream& out, ExprPrecedence precedence) const = 0;
-    virtual double Evaluate(/*добавьте сюда нужные аргументы*/ args) const = 0;
+    virtual double Evaluate(const CellLookup& lookup) const = 0;
 
     // higher is tighter
     virtual ExprPrecedence GetPrecedence() const = 0;
@@ -95,6 +97,12 @@ public:
 };
 
 namespace {
+void CheckFinite(double value) {
+    if (!std::isfinite(value)) {
+        throw FormulaError(FormulaError::Category::Arithmetic);
+    }
+}
+
 class BinaryOpExpr final : public Expr {
 public:
     enum Type : char {
@@ -142,8 +150,31 @@ public:
         }
     }
 
-    double Evaluate(/*добавьте нужные аргументы*/) const override {
-			// Скопируйте ваше решение из предыдущих уроков.
+    double Evaluate(const CellLookup& lookup) const override {
+        const double lhs = lhs_->Evaluate(lookup);
+        const double rhs = rhs_->Evaluate(lookup);
+        double result = 0.0;
+
+        switch (type_) {
+            case Add:
+                result = lhs + rhs;
+                break;
+            case Subtract:
+                result = lhs - rhs;
+                break;
+            case Multiply:
+                result = lhs * rhs;
+                break;
+            case Divide:
+                result = lhs / rhs;
+                break;
+            default:
+                assert(false);
+                return static_cast<double>(INT_MAX);
+        }
+
+        CheckFinite(result);
+        return result;
     }
 
 private:
@@ -180,43 +211,16 @@ public:
         return EP_UNARY;
     }
 
-    double Evaluate(/*добавьте нужные аргументы*/ args) const override {
-        // Скопируйте ваше решение из предыдущих уроков.
+    double Evaluate(const CellLookup& lookup) const override {
+        const double value = operand_->Evaluate(lookup);
+        const double result = type_ == UnaryMinus ? -value : value;
+        CheckFinite(result);
+        return result;
     }
 
 private:
     Type type_;
     std::unique_ptr<Expr> operand_;
-};
-
-class CellExpr final : public Expr {
-public:
-    explicit CellExpr(const Position* cell)
-        : cell_(cell) {
-    }
-
-    void Print(std::ostream& out) const override {
-        if (!cell_->IsValid()) {
-            out << FormulaError::Category::Ref;
-        } else {
-            out << cell_->ToString();
-        }
-    }
-
-    void DoPrintFormula(std::ostream& out, ExprPrecedence /* precedence */) const override {
-        Print(out);
-    }
-
-    ExprPrecedence GetPrecedence() const override {
-        return EP_ATOM;
-    }
-
-    double Evaluate(/*добавьте нужные аргументы*/ args) const override {
-        // реализуйте метод.
-    }
-
-private:
-    const Position* cell_;
 };
 
 class NumberExpr final : public Expr {
@@ -237,12 +241,43 @@ public:
         return EP_ATOM;
     }
 
-    double Evaluate(/*добавьте нужные аргументы*/ args) const override {
+    double Evaluate(const CellLookup& /* lookup */) const override {
         return value_;
     }
 
 private:
     double value_;
+};
+
+class CellExpr final : public Expr {
+public:
+    explicit CellExpr(Position pos, std::string text)
+        : pos_(pos)
+        , text_(std::move(text)) {
+    }
+
+    void Print(std::ostream& out) const override {
+        out << text_;
+    }
+
+    void DoPrintFormula(std::ostream& out, ExprPrecedence /* precedence */) const override {
+        out << text_;
+    }
+
+    ExprPrecedence GetPrecedence() const override {
+        return EP_ATOM;
+    }
+
+    double Evaluate(const CellLookup& lookup) const override {
+        if (!pos_.IsValid()) {
+            throw FormulaError(FormulaError::Category::Ref);
+        }
+        return lookup(pos_);
+    }
+
+private:
+    Position pos_;
+    std::string text_;
 };
 
 class ParseASTListener final : public FormulaBaseListener {
@@ -292,14 +327,10 @@ public:
 
     void exitCell(FormulaParser::CellContext* ctx) override {
         auto value_str = ctx->CELL()->getSymbol()->getText();
-        auto value = Position::FromString(value_str);
-        if (!value.IsValid()) {
-            throw FormulaException("Invalid position: " + value_str);
-        }
+        auto pos = Position::FromString(value_str);
 
-        cells_.push_front(value);
-        auto node = std::make_unique<CellExpr>(&cells_.front());
-        args_.push_back(std::move(node));
+        cells_.push_front(pos);
+        args_.push_back(std::make_unique<CellExpr>(pos, std::move(value_str)));
     }
 
     void exitBinaryOp(FormulaParser::BinaryOpContext* ctx) override {
@@ -374,12 +405,10 @@ FormulaAST ParseFormulaAST(std::istream& in) {
 
 FormulaAST ParseFormulaAST(const std::string& in_str) {
     std::istringstream in(in_str);
-    return ParseFormulaAST(in);
-}
-
-void FormulaAST::PrintCells(std::ostream& out) const {
-    for (auto cell : cells_) {
-        out << cell.ToString() << ' ';
+    try {
+        return ParseFormulaAST(in);
+    } catch (const std::exception& exc) {
+        std::throw_with_nested(FormulaException(exc.what()));
     }
 }
 
@@ -391,14 +420,13 @@ void FormulaAST::PrintFormula(std::ostream& out) const {
     root_expr_->PrintFormula(out, ASTImpl::EP_ATOM);
 }
 
-double FormulaAST::Execute(/*добавьте нужные аргументы*/ args) const {
-    return root_expr_->Evaluate(/*добавьте нужные аргументы*/ args);
+double FormulaAST::Execute(const CellLookup& lookup) const {
+    return root_expr_->Evaluate(lookup);
 }
 
 FormulaAST::FormulaAST(std::unique_ptr<ASTImpl::Expr> root_expr, std::forward_list<Position> cells)
     : root_expr_(std::move(root_expr))
     , cells_(std::move(cells)) {
-    cells_.sort();  // to avoid sorting in GetReferencedCells
 }
 
 FormulaAST::~FormulaAST() = default;

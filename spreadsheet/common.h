@@ -39,7 +39,7 @@ public:
     enum class Category {
         Ref,    // ссылка на ячейку с некорректной позицией
         Value,  // ячейка не может быть трактована как число
-        Div0,  // в результате вычисления возникло деление на ноль
+        Arithmetic,  // некорректная арифметическая операция
     };
 
     FormulaError(Category category);
@@ -54,7 +54,7 @@ private:
     Category category_;
 };
 
-std::ostream& operator<<(std::ostream& output, FormulaError fe);
+std::ostream& operator<<(std::ostream& output, const FormulaError& fe);
 
 // Исключение, выбрасываемое при попытке передать в метод некорректную позицию
 class InvalidPositionException : public std::out_of_range {
@@ -128,8 +128,7 @@ public:
     virtual CellInterface* GetCell(Position pos) = 0;
 
     // Очищает ячейку.
-    // Последующий вызов GetCell() для этой ячейки вернёт либо nullptr, либо
-    // объект с пустым текстом.
+    // Последующий вызов GetCell() для этой ячейки вернёт nullptr.
     virtual void ClearCell(Position pos) = 0;
 
     // Вычисляет размер области, которая участвует в печати.
@@ -141,6 +140,7 @@ public:
     // табуляции. После каждой строки выводится символ перевода строки. Для
     // преобразования ячеек в строку используются методы GetValue() или GetText()
     // соответственно. Пустая ячейка представляется пустой строкой в любом случае.
+    // Табуляция перед пустыми ячейками должна печататься.
     virtual void PrintValues(std::ostream& output) const = 0;
     virtual void PrintTexts(std::ostream& output) const = 0;
 };
